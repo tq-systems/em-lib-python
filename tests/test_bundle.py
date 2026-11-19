@@ -9,6 +9,10 @@
 #
 """Tests of tqem.bundle with the manifest of a real bundle."""
 # pylint: disable=missing-function-docstring
+import io
+import os
+import tarfile
+
 import pytest
 
 from tqem import bundle
@@ -54,3 +58,43 @@ def test_manifest_without_rootfs_image_aborts(tmp_path):
 def test_missing_manifest_aborts(tmp_path):
     with pytest.raises(FileNotFoundError):
         bundle.read_manifest(str(tmp_path))
+
+
+def add_file(tar, name, content=b""):
+    """Adds a file to a tar archive under construction."""
+    info = tarfile.TarInfo(name)
+    info.size = len(content)
+    tar.addfile(info, io.BytesIO(content))
+
+
+def write_bundle_dir(tmp_path, *members):
+    """Writes a manifest and a root file system archive with the given members."""
+    (tmp_path / "manifest.raucm").write_text(
+        MANIFEST.replace("em-image-embase-release-em-aarch64.tar.xz", "rootfs.tar"))
+    with tarfile.open(tmp_path / "rootfs.tar", "w") as tar:
+        for name in members:
+            add_file(tar, name, b"x")
+    return bundle.read_manifest(str(tmp_path))
+
+
+def test_apps_of_a_bundle_without_compression(tmp_path):
+    manifest = write_bundle_dir(tmp_path, "./opt/apps/backup/manifest.json",
+                                "./opt/apps/presets/manifest.json", "./opt/other/file")
+
+    assert bundle.installed_apps(str(tmp_path), manifest, str(tmp_path / "work")) == [
+        "backup", "presets"]
+
+
+def test_apps_of_a_compressed_bundle_come_from_the_apps_image(tmp_path, monkeypatch):
+    manifest = write_bundle_dir(tmp_path, "./opt/apps.squashfs")
+
+    def fake_unsquashfs(image, dest_dir, *files):
+        assert image.endswith("opt/apps.squashfs") and not files
+        os.makedirs(dest_dir)
+        os.makedirs(os.path.join(dest_dir, "backup"))
+        os.symlink("../../uncompressed-app", os.path.join(dest_dir, "uncompressed-app"))
+
+    monkeypatch.setattr(bundle, "unsquashfs", fake_unsquashfs)
+
+    assert bundle.installed_apps(str(tmp_path), manifest, str(tmp_path / "work")) == [
+        "backup", "uncompressed-app"]

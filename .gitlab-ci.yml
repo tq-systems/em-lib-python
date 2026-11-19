@@ -9,8 +9,10 @@
 #
 
 include:
-  # Include the SAST template early to prevent an override of the stages
-  - template: Jobs/SAST.gitlab-ci.yml
+  # Include the SAST job early to prevent an override of the stages
+  - project: devsecops/ci-components
+    file: jobs/gitlab/sast.yml
+    ref: v0.1.0
   - project: tq-em/public/build/base
     file: ci/include.yml
     ref: v4.1.0
@@ -36,25 +38,19 @@ Python Unit Tests:
 Gitleaks:
   extends: .gitleaks
 
-# The SBOM tool entry carries the version from pyproject.toml, so the tag has to match it
+# The SBOM tool entry carries the version from pyproject.toml, so the tag has to match it.
+# bump-version.sh writes the version, a change means the release commit missed it.
 Check Version:
   extends: .python
   rules:
     - if: $CI_COMMIT_TAG
   script: |
-    version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-    if [ "$CI_COMMIT_TAG" != "v$version" ]; then
-      echo "Tag $CI_COMMIT_TAG does not match version $version in pyproject.toml"
+    ./bump-version.sh "$CI_COMMIT_TAG"
+    if ! git diff --cached --quiet; then
+      echo "Tag $CI_COMMIT_TAG does not match the version in pyproject.toml"
       exit 1
     fi
 
-# Runs on our runners and fails on findings with high or critical severity
+# The component brings the severity gate, only the runner tag is ours
 semgrep-sast:
-  tags:
-    - tq-em-linux
-  script: |
-    /analyzer run
-    if grep -qE '"severity" *: *"(High|Critical)"' gl-sast-report.json; then
-      echo "Found issue(s) with high or critical severity"
-      exit 1
-    fi
+  extends: .gitlab-runner-tag

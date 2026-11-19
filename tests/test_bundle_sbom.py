@@ -9,10 +9,8 @@
 #
 """Tests of tqem.bundle_sbom with SBOM fixtures, no real bundle needed."""
 # pylint: disable=missing-function-docstring
-import io
+import configparser
 import json
-import pathlib
-import tarfile
 
 import pytest
 
@@ -104,69 +102,57 @@ def test_excluded_purls_leave_components_and_dependencies():
     assert dependencies(merged)["pkg:emos-app/backup"] == ["pkg:npm/vue@3.4"]
 
 
-def add_file(tar, name, content=b""):
-    """Adds a file to a tar archive under construction."""
-    info = tarfile.TarInfo(name)
-    info.size = len(content)
-    tar.addfile(info, io.BytesIO(content))
-
-
-def test_rootfs_tar_without_compression_holds_the_apps(tmp_path):
-    rootfs = tmp_path / "rootfs.tar"
-    with tarfile.open(rootfs, "w") as tar:
-        add_file(tar, "./opt/apps/backup/manifest.json", b"{}")
-        add_file(tar, "./opt/apps/backup/sbom/backup.go-sbom.json",
-                 json.dumps(app_sbom("pkg:npm/vue@3.4")).encode())
-        add_file(tar, "./opt/apps/presets/manifest.json", b"{}")
-
-    app_sboms, apps_image = sbom.read_rootfs_tar(str(rootfs), str(tmp_path / "work"))
-
-    assert apps_image is None
-    assert app_sboms == {"opt/apps/backup": [app_sbom("pkg:npm/vue@3.4")], "opt/apps/presets": []}
-
-
-def test_rootfs_tar_with_compression_holds_the_apps_image(tmp_path):
-    rootfs = tmp_path / "rootfs.tar"
-    with tarfile.open(rootfs, "w") as tar:
-        add_file(tar, "./opt/apps.squashfs", b"squashfs")
-        add_file(tar, "./opt/uncompressed-app/sbom/app.go-sbom.json",
-                 json.dumps(app_sbom("pkg:golang/example@1.0")).encode())
-
-    app_sboms, apps_image = sbom.read_rootfs_tar(str(rootfs), str(tmp_path / "work"))
-
-    assert app_sboms == {"opt/uncompressed-app": [app_sbom("pkg:golang/example@1.0")]}
-    assert pathlib.Path(apps_image).read_bytes() == b"squashfs"
-
-
-def test_apps_dir_reports_apps_without_sbom(tmp_path):
-    sbom_dir = tmp_path / "backup" / "sbom"
-    sbom_dir.mkdir(parents=True)
-    (sbom_dir / "backup.go-sbom.json").write_text(json.dumps(app_sbom("pkg:npm/vue@3.4")))
-    (tmp_path / "presets").mkdir()
-    # emit links an uncompressed app out of the apps image to opt/<app> of the root file system
-    (tmp_path / "uncompressed-app").symlink_to("../uncompressed-app")
-    rootfs_sboms = {"opt/uncompressed-app": [app_sbom("pkg:golang/example@1.0")]}
-
-    assert sbom.read_apps_dir(str(tmp_path), rootfs_sboms) == {
-        "backup": [app_sbom("pkg:npm/vue@3.4")], "presets": [],
-        "uncompressed-app": [app_sbom("pkg:golang/example@1.0")]}
-
-
 def run_main(tmp_path, core_sbom):
-    """Runs the tool against the bundle directory tmp_path/bin."""
+    """Runs the tool against the bundles of tmp_path/bin."""
     sbom.main(["--bundle-dir", str(tmp_path / "bin"), "--bundle-name", "demo",
+               "--app-sbom-dir", str(tmp_path / "apps"),
                "--core-image-sbom", str(core_sbom),
                "--output-dir", str(tmp_path / "doc"), "--work-dir", str(tmp_path / "work")])
 
 
 def test_missing_bundle_aborts(tmp_path):
     (tmp_path / "bin").mkdir()
+    (tmp_path / "apps").mkdir()
     with pytest.raises(SystemExit, match="no .raucb file"):
+        run_main(tmp_path, tmp_path / "core.json")
+
+
+def test_missing_app_sbom_directory_aborts(tmp_path):
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "demo-devel-hw02xx-latest.raucb").write_bytes(b"")
+    with pytest.raises(SystemExit, match="app SBOM directory not found"):
         run_main(tmp_path, tmp_path / "core.json")
 
 
 def test_missing_core_image_sbom_aborts(tmp_path):
     (tmp_path / "bin").mkdir()
     (tmp_path / "bin" / "demo-devel-hw02xx-latest.raucb").write_bytes(b"")
+    (tmp_path / "apps").mkdir()
     with pytest.raises(SystemExit, match="No such file or directory: .*core.json"):
         run_main(tmp_path, tmp_path / "core.json")
+
+
+def test_bundle_sbom_holds_the_apps_of_the_bundle(tmp_path, monkeypatch):
+    """Only the apps of the bundle are merged, the directory holds those of all specs."""
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "demo-devel-hw02xx-latest.raucb").write_bytes(b"")
+    for app, purl in (("backup", "pkg:npm/vue@3.4"), ("other-bundle-app", "pkg:npm/left-pad@1")):
+        app_dir = tmp_path / "apps" / app
+        app_dir.mkdir(parents=True)
+        (app_dir / f"{app}.go-sbom.json").write_text(json.dumps(app_sbom(purl)))
+    (tmp_path / "core.json").write_text(json.dumps(CORE_SBOM))
+    manifest = configparser.ConfigParser()
+    manifest.read_dict({"update": {"version": "10.0.0", "compatible": "em-aarch64/tq-embase"}})
+    monkeypatch.setattr(sbom.bundle, "extract_bundle",
+                        lambda raucb, work_dir: (manifest, ["backup", "presets"]))
+
+    run_main(tmp_path, tmp_path / "core.json")
+
+    written = json.loads((tmp_path / "doc" / "demo-devel-hw02xx-latest-sbom.json").read_text())
+    assert written["metadata"]["component"]["name"] == "demo EM Bundle"
+    assert written["metadata"]["component"]["version"] == "10.0.0"
+    assert written["properties"] == [
+        {"name": "emos.compatible", "value": "em-aarch64/tq-embase"},
+        {"name": "emos.apps_without_sbom", "value": "presets"}]
+    assert dependencies(written)["em-bundle-root"] == [
+        "pkg:emos-app/backup", "pkg:emos-os/core-image"]

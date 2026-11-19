@@ -7,11 +7,12 @@
 # https://www.tq-group.com/en/support/downloads/tq-software-license-conditions/
 # In case of any license issues please contact license@tq-group.com.
 #
-"""Merges the SBOMs of the apps in a RAUC bundle and the SBOM of the core image into one
+"""Merges the SBOMs of the apps of a RAUC bundle and the SBOM of the core image into one
 CycloneDX file per bundle, with the layers bundle, apps and operating system.
 
-The tool creates no SBOM itself. It reads the app SBOMs shipped inside the bundle and the
-core image SBOM given on the command line.
+The tool creates no SBOM itself. The bundle names the apps it installs, their SBOMs come from the
+directory that tqem-fetch-app-sboms filled from the deploy tree, and the core image SBOM from the
+command line.
 """
 import argparse
 import configparser
@@ -30,6 +31,7 @@ from cyclonedx.validation.json import JsonStrictValidator
 from packageurl import PackageURL
 
 from tqem import bundle
+from tqem.app_sboms import read_app_sboms
 
 SPEC_VERSION = "1.6"
 ROOT_COMPONENT_NAME = "EM Bundle"
@@ -37,10 +39,6 @@ TOOL_NAME = "tqem-bundle-sbom"
 ROOT_BOM_REF = "em-bundle-root"
 APP_PURL_PREFIX = "pkg:emos-app/"
 OS_BOM_REF = "pkg:emos-os/core-image"
-OPT_DIR = "opt/"
-APPS_DIR = "opt/apps/"
-APPS_IMAGE = "opt/apps.squashfs"
-SBOM_SUFFIX = "bom.json"
 MERGED_COMPONENT_FIELDS = (
     "type", "group", "cpe", "name", "version", "purl", "licenses", "properties")
 CPE_PART_TYPES = {"a": "generic", "o": "os", "h": "hardware"}
@@ -48,71 +46,6 @@ CPE_PART_TYPES = {"a": "generic", "o": "os", "h": "hardware"}
 
 class SbomError(Exception):
     """An error that aborts the run with a message instead of a traceback."""
-
-
-def read_rootfs_tar(tar_path, work_dir):
-    """Collects the SBOMs below opt from the root file system archive of a bundle.
-
-    Without compression the apps lie below opt/apps. With compression they lie in
-    opt/apps.squashfs, which is extracted to work_dir and returned as second value. An app that
-    emit installs uncompressed lies below opt/<app>, the apps image links to it.
-
-    Returns:
-        tuple: (dict app directory like opt/apps/<app> -> list of SBOM documents,
-                path of the apps image or None)
-    """
-    app_sboms = {}
-    apps_image = None
-    with tarfile.open(tar_path) as tar:
-        for member in tar:
-            name = os.path.normpath(member.name)
-            if name == APPS_IMAGE:
-                tar.extract(member, work_dir, filter="data")
-                apps_image = os.path.join(work_dir, APPS_IMAGE)
-            elif name.startswith(OPT_DIR):
-                depth = 3 if name.startswith(APPS_DIR) else 2
-                docs = app_sboms.setdefault("/".join(name.split("/")[:depth]), [])
-                if member.isfile() and name.endswith(SBOM_SUFFIX):
-                    docs.append(json.load(tar.extractfile(member)))
-    return app_sboms, apps_image
-
-
-def read_apps_dir(apps_dir, rootfs_sboms):
-    """Collects the app SBOMs below an extracted apps image, one top-level entry per app.
-
-    An app that emit installs uncompressed is a symlink to opt/<app> of the root file system,
-    its SBOMs come from rootfs_sboms.
-    """
-    app_sboms = {}
-    for app in sorted(os.listdir(apps_dir)):
-        app_path = os.path.join(apps_dir, app)
-        if os.path.islink(app_path):
-            target = os.path.normpath(os.path.join(APPS_DIR, os.readlink(app_path)))
-            app_sboms[app] = rootfs_sboms.get(target, [])
-            continue
-        docs = app_sboms[app] = []
-        for root, dirs, files in os.walk(app_path):
-            dirs.sort()
-            for name in sorted(files):
-                if name.endswith(SBOM_SUFFIX):
-                    with open(os.path.join(root, name), encoding="utf-8") as sbom_file:
-                        docs.append(json.load(sbom_file))
-    return app_sboms
-
-
-def collect_app_sboms(raucb_path, work_dir):
-    """Extracts a RAUC bundle and returns its manifest and the app SBOMs."""
-    bundle_dir = os.path.join(work_dir, "bundle")
-    bundle.unsquashfs(raucb_path, bundle_dir)
-    manifest = bundle.read_manifest(bundle_dir)
-    rootfs_sboms, apps_image = read_rootfs_tar(
-        bundle.rootfs_archive(bundle_dir, manifest), work_dir)
-    if not apps_image:
-        return manifest, {path[len(APPS_DIR):]: docs for path, docs
-                          in rootfs_sboms.items() if path.startswith(APPS_DIR)}
-    apps_dir = os.path.join(work_dir, "apps")
-    bundle.unsquashfs(apps_image, apps_dir)
-    return manifest, read_apps_dir(apps_dir, rootfs_sboms)
 
 
 def cpe_to_purl(cpe, version):
@@ -264,6 +197,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle-dir", required=True, help="directory with the .raucb files")
     parser.add_argument("--bundle-name", required=True, help="BUNDLE_NAME of the bundle Makefile")
+    parser.add_argument("--app-sbom-dir", required=True,
+                        help="directory with one directory of SBOMs per app, see "
+                             "tqem-fetch-app-sboms")
     parser.add_argument("--core-image-sbom", required=True, help="CycloneDX SBOM of the core image")
     parser.add_argument("--output-dir", required=True, help="directory for <bundle>-sbom.json")
     parser.add_argument("--work-dir", required=True, help="scratch directory, emptied per bundle")
@@ -272,12 +208,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     try:
-        for name in ("bundle_dir", "bundle_name", "core_image_sbom", "output_dir", "work_dir"):
+        for name in ("bundle_dir", "bundle_name", "app_sbom_dir", "core_image_sbom", "output_dir",
+                     "work_dir"):
             if not getattr(args, name):
                 raise SbomError(f"--{name.replace('_', '-')} is empty")
         bundles = sorted(n for n in os.listdir(args.bundle_dir) if n.endswith(".raucb"))
         if not bundles:
             raise SbomError(f"no .raucb file in {args.bundle_dir}")
+        if not os.path.isdir(args.app_sbom_dir):
+            raise SbomError(f"app SBOM directory not found: {args.app_sbom_dir}")
         with open(args.core_image_sbom, encoding="utf-8") as core_file:
             core_sbom = json.load(core_file)
 
@@ -290,13 +229,18 @@ def main(argv=None):
 
 
 def write_bundle_sbom(args, raucb, core_sbom):
-    """Writes the merged SBOM of one bundle file to the output directory."""
+    """Writes the merged SBOM of one bundle file to the output directory.
+
+    The bundle names the apps it installs, the SBOMs of those apps come from the download
+    directory. An app whose SBOM is missing there ends up in emos.apps_without_sbom.
+    """
     bundle_file = os.path.splitext(raucb)[0]
     work_dir = os.path.join(args.work_dir, bundle_file)
     shutil.rmtree(work_dir, ignore_errors=True)
     os.makedirs(work_dir)
-    manifest, app_sboms = collect_app_sboms(os.path.join(args.bundle_dir, raucb), work_dir)
-    sbom, missing_apps = merge(app_sboms, core_sbom, args.exclude_purl)
+    manifest, apps = bundle.extract_bundle(os.path.join(args.bundle_dir, raucb), work_dir)
+    sbom, missing_apps = merge(read_app_sboms(args.app_sbom_dir, apps), core_sbom,
+                               args.exclude_purl)
     add_metadata(sbom, args.bundle_name,
                  manifest.get("update", "version", fallback=None),
                  manifest.get("update", "compatible", fallback=None), missing_apps)

@@ -10,8 +10,10 @@ The code can be tested without the toolchain.
 - `tests`: the unit tests, see `tests/README.md`
 
 ## Executables
-- `tqem-bundle-sbom`: merges the app SBOMs of a RAUC bundle and the core image SBOM into one
-  CycloneDX file per bundle
+- `tqem-fetch-app-sboms`: copies the SBOMs of the apps of the bundle specs out of the mounted
+  deploy tree, one directory per app
+- `tqem-bundle-sbom`: merges the SBOMs of the apps a bundle installs with the core image SBOM into
+  one CycloneDX file per bundle
 - `tqem-go-sbom-licenses`: writes the licenses of the go-licenses manifest into the Go SBOM of an app
 
 Each executable shows its options with `--help`.
@@ -29,8 +31,9 @@ The toolchain installs a released version from GitHub:
     pip install git+https://github.com/tq-systems/em-lib-python@v1.0.0
 
 ## Release
-Raise the version in `pyproject.toml` and tag the commit with the same version, e.g. `v1.0.0`.
-The tag pipeline fails if both differ, because the SBOMs carry the version from `pyproject.toml`.
+`em-release-commit v1.0.0` runs `bump-version.sh`, which writes the version into
+`pyproject.toml`, and tags the commit. The tag pipeline runs the same script and fails if it
+changes anything, because the SBOMs carry the version from `pyproject.toml`.
 
 ## License information
 This project is licensed under the TQSPSLA-1.0.3 license, see LICENSE file for further details.
