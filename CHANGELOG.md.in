@@ -1,0 +1,5 @@
+## [{{ version }}]
+### Added
+- RAUC bundle module: squashfs extraction, manifest, root file system archive
+- tqem-bundle-sbom: merge the app SBOMs of a bundle and the core image SBOM
+- tqem-go-sbom-licenses: take the Go SBOM licenses from the go-licenses manifest

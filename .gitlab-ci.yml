@@ -1,0 +1,60 @@
+#
+# Copyright (c) 2026 TQ-Systems GmbH <license@tq-group.com>, D-82229 Seefeld, Germany. All rights reserved.
+# Author: Hans-Christian Melzer and the Energy Manager development team
+#
+# This software is licensed under the TQ-Systems Product Software License Agreement Version 1.0.3 or any later version.
+# You can obtain a copy of the License Agreement in the TQS (TQ-Systems Software Licenses) folder on the following website:
+# https://www.tq-group.com/en/support/downloads/tq-software-license-conditions/
+# In case of any license issues please contact license@tq-group.com.
+#
+
+include:
+  # Include the SAST template early to prevent an override of the stages
+  - template: Jobs/SAST.gitlab-ci.yml
+  - project: tq-em/public/build/base
+    file: ci/include.yml
+    ref: v4.1.0
+
+variables:
+  # Without it the SAST template runs in branch pipelines only, which base suppresses while an MR is open
+  AST_ENABLE_MR_PIPELINES: "true"
+
+# The base test image has no pip, the official Python image brings pip, venv and make
+.python:
+  stage: test
+  extends: .gitlab-runner-tag
+  image: python:3.12-bookworm
+
+Python Linter:
+  extends: .python
+  script: make lint
+
+Python Unit Tests:
+  extends: .python
+  script: make test
+
+Gitleaks:
+  extends: .gitleaks
+
+# The SBOM tool entry carries the version from pyproject.toml, so the tag has to match it
+Check Version:
+  extends: .python
+  rules:
+    - if: $CI_COMMIT_TAG
+  script: |
+    version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+    if [ "$CI_COMMIT_TAG" != "v$version" ]; then
+      echo "Tag $CI_COMMIT_TAG does not match version $version in pyproject.toml"
+      exit 1
+    fi
+
+# Runs on our runners and fails on findings with high or critical severity
+semgrep-sast:
+  tags:
+    - tq-em-linux
+  script: |
+    /analyzer run
+    if grep -qE '"severity" *: *"(High|Critical)"' gl-sast-report.json; then
+      echo "Found issue(s) with high or critical severity"
+      exit 1
+    fi
