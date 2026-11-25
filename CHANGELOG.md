@@ -1,0 +1,7 @@
+## [1.0.0] - 2026-11-25
+### Added
+- RAUC bundle module: squashfs extraction, manifest, installed apps
+- tqem-fetch-app-sboms: copy the app SBOMs of a bundle out of the mounted deploy tree
+- tqem-bundle-sbom: merge the app SBOMs of a bundle and the core image SBOM
+- tqem-go-sbom-licenses: take the Go SBOM licenses from the go-licenses manifest
+
